@@ -1,6 +1,6 @@
 #version 440
-// Area-average downscale: averages a grid of bilinear taps covering each
-// output pixel's footprint in the source texture. Sharp, without aliasing.
+// Downscale with a Catmull-Rom cubic kernel stretched over each output pixel's
+// footprint in the source texture. Sharper than a box average, without aliasing.
 
 layout(location = 0) in vec2 qt_TexCoord0;
 layout(location = 0) out vec4 fragColor;
@@ -14,18 +14,37 @@ layout(std140, binding = 0) uniform buf {
 
 layout(binding = 1) uniform sampler2D source;
 
+const int MAX_TAPS = 8; // per side, per axis
+
+float catmullRom(float x) {
+    x = abs(x);
+    if (x < 1.0) return (1.5 * x - 2.5) * x * x + 1.0;
+    if (x < 2.0) return ((-0.5 * x + 2.5) * x - 4.0) * x + 2.0;
+    return 0.0;
+}
+
 void main() {
-    // Each bilinear tap already averages 2x2 texels.
-    vec2 taps = clamp(ceil(footprint * 0.5), vec2(1.0), vec2(8.0));
-    vec2 span = max(footprint, vec2(1.0)) * texelStep;
+    vec2 scale = max(footprint, vec2(1.0));
+    vec2 radius = 2.0 * scale; // kernel support in texels
+    // Step one texel at a time; widen the stride only if the kernel needs more taps.
+    vec2 stride = max(vec2(1.0), ceil(radius / float(MAX_TAPS)));
+    vec2 pos = qt_TexCoord0 / texelStep;      // in texels
+    vec2 base = floor(pos - 0.5) + 0.5;       // nearest texel center at or below
+
     vec4 acc = vec4(0.0);
-    for (int y = 0; y < 8; y++) {
-        if (float(y) >= taps.y) break;
-        for (int x = 0; x < 8; x++) {
-            if (float(x) >= taps.x) break;
-            vec2 offset = ((vec2(x, y) + 0.5) / taps - 0.5) * span;
-            acc += texture(source, qt_TexCoord0 + offset);
+    float weightSum = 0.0;
+    for (int j = -MAX_TAPS; j <= MAX_TAPS; j++) {
+        float ty = base.y + float(j) * stride.y;
+        float wy = catmullRom((ty - pos.y) / scale.y);
+        if (wy == 0.0) continue;
+        for (int i = -MAX_TAPS; i <= MAX_TAPS; i++) {
+            float tx = base.x + float(i) * stride.x;
+            float wx = catmullRom((tx - pos.x) / scale.x);
+            if (wx == 0.0) continue;
+            float w = wx * wy;
+            acc += w * texture(source, vec2(tx, ty) * texelStep);
+            weightSum += w;
         }
     }
-    fragColor = acc / (taps.x * taps.y) * qt_Opacity;
+    fragColor = clamp(acc / weightSum, 0.0, 1.0) * qt_Opacity;
 }
